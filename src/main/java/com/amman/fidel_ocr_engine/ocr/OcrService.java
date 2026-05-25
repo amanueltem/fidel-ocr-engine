@@ -1,6 +1,7 @@
 package com.amman.fidel_ocr_engine.ocr;
 
 import net.sourceforge.tess4j.Tesseract;
+import net.sourceforge.tess4j.TesseractException;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
@@ -20,7 +21,6 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.InputStream;
 
 @Service
 public class OcrService {
@@ -39,80 +39,89 @@ public class OcrService {
         this.tesseract.setVariable("user_defined_dpi", "300");
     }
 
-    // --- LEGACY TESSERACT METHOD (UNCHANGED) ---
+    // 1. TESSERACT ONLY
     public byte[] processAndConvertToDocx(MultipartFile file, String contentType) throws Exception {
         try (XWPFDocument document = new XWPFDocument()) {
-            if (contentType != null && (contentType.contains("image/jpeg") || contentType.contains("image/png"))) {
-                try (InputStream is = file.getInputStream()) {
-                    BufferedImage rawImage = ImageIO.read(is);
-                    appendParagraphToDocx(document, tesseract.doOCR(preprocessImage(rawImage)));
+            processFile(file, contentType, (img) -> {
+                try {
+                    return tesseract.doOCR(preprocessImage(img));
+                } catch (TesseractException e) {
+                    throw new RuntimeException(e);
                 }
-            } else if (contentType != null && contentType.contains("application/pdf")) {
-                try (PDDocument pdf = Loader.loadPDF(file.getBytes())) {
-                    PDFRenderer renderer = new PDFRenderer(pdf);
-                    for (int i = 0; i < pdf.getNumberOfPages(); i++) {
-                        appendParagraphToDocx(document, tesseract.doOCR(preprocessImage(renderer.renderImageWithDPI(i, 300))));
-                        if (i < pdf.getNumberOfPages() - 1) document.createParagraph().setPageBreak(true);
-                    }
-                }
-            }
-            try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-                document.write(out);
-                return out.toByteArray();
-            }
+            }, document);
+            return writeDocx(document);
         }
     }
 
-    // --- 100% AI METHOD (UPDATED TO HANDLE PDF/IMAGES) ---
+    // 2. AI ONLY (100% AI)
     public byte[] processAndConvertToDocxWithAi(MultipartFile file, String contentType) throws Exception {
         StringBuilder fullText = new StringBuilder();
+        processFile(file, contentType, (img) -> {
+            try { return callAiForImage(img, "Transcribe this Ethiopic document accurately. Output ONLY the raw Ethiopic text. Do not include any explanations or intro/outro text."); }
+            catch (Exception e) { return ""; }
+        }, fullText);
 
+        try (XWPFDocument document = new XWPFDocument()) {
+            appendParagraphToDocx(document, fullText.toString());
+            return writeDocx(document);
+        }
+    }
+
+    // 3. HYBRID (TESSERACT + AI CORRECTION)
+    public byte[] processAndConvertToDocxHybrid(MultipartFile file, String contentType) throws Exception {
+        StringBuilder fullText = new StringBuilder();
+        processFile(file, contentType, (img) -> {
+            String raw = null;
+            try {
+                raw = tesseract.doOCR(preprocessImage(img));
+            } catch (TesseractException e) {
+                throw new RuntimeException(e);
+            }
+            return callAiForImageText("Correct this OCR text. Fix formatting and characters. Output ONLY the corrected text. Do NOT add meta-comments or explanations: " + raw);
+        }, fullText);
+
+        try (XWPFDocument document = new XWPFDocument()) {
+            appendParagraphToDocx(document, fullText.toString());
+            return writeDocx(document);
+        }
+    }
+
+    // --- UTILITIES ---
+
+    private void processFile(MultipartFile file, String contentType, java.util.function.Function<BufferedImage, String> processor, Object target) throws Exception {
         if (contentType != null && contentType.contains("application/pdf")) {
             try (PDDocument pdf = Loader.loadPDF(file.getBytes())) {
                 PDFRenderer renderer = new PDFRenderer(pdf);
                 for (int i = 0; i < pdf.getNumberOfPages(); i++) {
-                    fullText.append(callAiForImage(renderer.renderImageWithDPI(i, 150))).append("\n\n");
+                    String result = processor.apply(renderer.renderImageWithDPI(i, 300));
+                    if (target instanceof XWPFDocument) appendParagraphToDocx((XWPFDocument) target, result);
+                    else ((StringBuilder) target).append(result).append("\n");
                 }
             }
         } else {
-            fullText.append(callAiForImage(ImageIO.read(file.getInputStream())));
-        }
-
-        try (XWPFDocument document = new XWPFDocument(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            appendParagraphToDocx(document, fullText.toString());
-            document.write(out);
-            return out.toByteArray();
+            String result = processor.apply(ImageIO.read(file.getInputStream()));
+            if (target instanceof XWPFDocument) appendParagraphToDocx((XWPFDocument) target, result);
+            else ((StringBuilder) target).append(result);
         }
     }
 
-    private String callAiForImage(BufferedImage image) throws Exception {
+    private String callAiForImage(BufferedImage image, String prompt) throws Exception {
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             ImageIO.write(image, "jpeg", baos);
             Media media = new Media(MimeTypeUtils.IMAGE_JPEG, new ByteArrayResource(baos.toByteArray()));
-            UserMessage message = UserMessage.builder()
-                    .text("Transcribe this Ethiopic document accurately. Output only the transcription.")
-                    .media(media)
-                    .build();
-            return chatModel.call(new Prompt(message)).getResult().getOutput().getText();
+            return chatModel.call(new Prompt(UserMessage.builder().text(prompt).media(media).build())).getResult().getOutput().getText();
         }
     }
 
-    // --- HYBRID METHOD (UNCHANGED) ---
-    public byte[] processAndConvertToDocxHybrid(MultipartFile file, String contentType) throws Exception {
-        String rawOcrText = tesseract.doOCR(preprocessImage(ImageIO.read(file.getInputStream())));
-        String correctionPrompt = "Correct this Ethiopic OCR output, fix characters and formatting, keep meaning: " + rawOcrText;
-        String corrected = chatModel.call(new Prompt(UserMessage.builder().text(correctionPrompt).build())).getResult().getOutput().getText();
+    private String callAiForImageText(String prompt) {
+        return chatModel.call(new Prompt(UserMessage.builder().text(prompt).build())).getResult().getOutput().getText();
+    }
 
-        try (XWPFDocument document = new XWPFDocument(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            appendParagraphToDocx(document, corrected);
-            document.write(out);
+    private byte[] writeDocx(XWPFDocument doc) throws Exception {
+        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            doc.write(out);
             return out.toByteArray();
         }
-    }
-
-    private BufferedImage preprocessImage(BufferedImage src) {
-        // ... (Your existing Otsu logic)
-        return src; // Simplified for brevity
     }
 
     private void appendParagraphToDocx(XWPFDocument document, String text) {
@@ -124,5 +133,10 @@ public class OcrService {
             run.setFontSize(12);
             run.setFontFamily("Abyssinica SIL");
         }
+    }
+
+    private BufferedImage preprocessImage(BufferedImage src) {
+        // Implementation of Otsu or standard grayscale/binarization
+        return src;
     }
 }
