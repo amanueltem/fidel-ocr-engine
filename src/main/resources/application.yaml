@@ -1,0 +1,3 @@
+spring:
+  application:
+    name: fidel-ocr-engine
