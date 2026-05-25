@@ -1,3 +1,5 @@
 spring:
   application:
     name: fidel-ocr-engine
+  servlet:
+    multipart.max-file-size: 50MB
