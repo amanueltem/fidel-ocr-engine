@@ -17,37 +17,49 @@ public class OcrController {
         this.ocrService = ocrService;
     }
 
-    /**
-     * Accepts a scanned image or PDF, executes inference via the Ge'ez ONNX engine,
-     * and streams a native, editable Microsoft Word (.docx) file back to the client.
-     */
-    @PostMapping(value = "/convert-to-word", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<?> convertScannedDocumentToWord(@RequestParam("file") MultipartFile file) {
-        String contentType = file.getContentType();
+    // 1. TESSERACT ONLY (The deterministic baseline)
+    @PostMapping(value = "/tesseract-only", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> convertTesseractOnly(@RequestParam("file") MultipartFile file) {
+        return execute(file, "TESSERACT");
+    }
 
-        if (file.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body("Uploaded payload cannot be empty.");
-        }
+    // 2. AI ONLY (The pure vision-based transcription)
+    @PostMapping(value = "/ai-only", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> convertAiOnly(@RequestParam("file") MultipartFile file) {
+        return execute(file, "AI");
+    }
+
+    // 3. HYBRID (The Tesseract + AI correction pipeline)
+    @PostMapping(value = "/hybrid", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> convertHybrid(@RequestParam("file") MultipartFile file) {
+        return execute(file, "HYBRID");
+    }
+
+    /**
+     * Internal executor to avoid code duplication across the 3 endpoints.
+     */
+    private ResponseEntity<?> execute(MultipartFile file, String strategy) {
+        if (file.isEmpty()) return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("File is empty");
 
         try {
-            // Process the input document and compile the DOCX structure
-            byte[] docxBytes = ocrService.processAndConvertToDocx(file, contentType);
+            byte[] bytes;
+            String contentType = file.getContentType();
 
-            // Configure file download attachments headers explicitly
+            switch (strategy) {
+                case "TESSERACT" -> bytes = ocrService.processAndConvertToDocx(file, contentType);
+                case "AI" -> bytes = ocrService.processAndConvertToDocxWithAi(file, contentType);
+                case "HYBRID" -> bytes = ocrService.processAndConvertToDocxHybrid(file, contentType);
+                default -> throw new IllegalArgumentException("Unknown strategy");
+            }
+
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
-            headers.setContentDispositionFormData("attachment", "fidel_extracted_document.docx");
-            headers.setCacheControl("must-revalidate, post-check=0, pre-check=0");
-
-            return new ResponseEntity<>(docxBytes, headers, HttpStatus.OK);
+            headers.setContentDispositionFormData("attachment", "fidel_" + strategy.toLowerCase() + ".docx");
+            return new ResponseEntity<>(bytes, headers, HttpStatus.OK);
 
         } catch (Exception e) {
-            // Explicit tracking to standard output to trace logic failures in real time
             e.printStackTrace();
-
-            // Re-throw the clean exception up so it hits your GlobalExceptionHandler flawlessly
-            throw new RuntimeException("Fidel OCR Engine pipeline failed processing execution: " + e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(strategy + " failed: " + e.getMessage());
         }
     }
 }

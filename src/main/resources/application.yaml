@@ -2,4 +2,25 @@ spring:
   application:
     name: fidel-ocr-engine
   servlet:
-    multipart.max-file-size: 50MB
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+  ai:
+    openai:
+      # The starter specifically looks for 'spring.ai.openai.api-key'
+      api-key: ${GROQ_API_KEY}
+      # Point to Groq's URL to use their engine
+      base-url: https://api.groq.com/openai/v1
+      chat:
+        options:
+          model: meta-llama/llama-4-scout-17b-16e-instruct
+          temperature: 0.1
+
+    # Global AI retry settings (moved to the top-level ai namespace)
+    retry:
+      max-attempts: 3
+      backoff:
+        initial-interval: 2000
+        max-interval: 10000
+        multiplier: 2.0
